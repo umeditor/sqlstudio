@@ -8,6 +8,24 @@ The [SQL Studio page](https://mateuszdabrowski.pl/sql-studio) explains what each
 
 **Install it in the parent Business Unit.** Create the pieces of steps 2 and 3 in the parent (Enterprise) Business Unit, also when your team works in one child BU and the parent is an empty shell. One deployment there serves every child BU you grant on the Installed Package's Access tab (step 6). Only there can SQL Studio list the parent's shared and synchronized Data Extensions, such as `Account_Salesforce` from Marketing Cloud Connect, with their fields for completion. Installed in a child BU, it sees only that BU's own Data Extensions, and queries on the parent's `ENT.` names still run without help from the sidebar or completion (a user's deployment, 2026-10-12).
 
+## Required deployment mitigation: a dedicated HTTPS origin
+
+**This guidance adds no runtime protection.** SQL Studio does not enforce origin isolation. An existing installation on an origin shared with untrusted pages remains exposed to same-origin session access until an administrator moves it to a dedicated origin and restricts publishing there. Updating this documentation alone does not secure that installation.
+
+Before creating the pieces, reserve a dedicated HTTPS origin for SQL Studio's Cloud Page and both Code Resources. An origin is the scheme, hostname and port, for example `https://sqlstudio.example.com`. Different paths, Site Keys, CloudPages folders or Business Units on that origin do not separate pages in the browser.
+
+Only trusted administrators should be able to publish content on this origin. Do not use an origin that also serves marketing landing pages or other applications. A script on another page of the same origin can potentially sign in to SQL Studio as a visitor who is signed in to MCE, read the resulting session and call the Backend with that visitor's permissions. Any third-party script loaded by a page on the origin has that page's access too.
+
+The optional `allowedReferrers` setting does not provide this isolation: a same-origin script can act through the SQL Studio page itself. SQL Studio cannot check what other pages are published on its origin or who may publish them. The protection comes from deploying on a separate origin, which gives the browser a boundary between SQL Studio and unrelated pages, and keeping that origin under trusted control. If your account cannot provide it, resolve that before deploying SQL Studio.
+
+Before publishing, confirm:
+
+- The Cloud Page and both Code Resources use the reserved HTTPS origin and its valid SSL certificate.
+- An inventory of published content on that origin contains only SQL Studio, including content owned by other teams or Business Units.
+- Only trusted administrators can publish or change content on that origin, and scripts loaded by its pages are approved for access to SQL Studio sessions and results.
+
+For an existing installation on a shared origin, move the three pieces to the dedicated origin and update their URL settings and the Installed Package's login, logout and redirect URLs. Unpublish the old pieces and invalidate the old sessions by deleting their rows from SQL Studio Auth Log. Verify sign-in, session renewal and querying at the new URLs before restoring user access. Recheck the content inventory and publisher access whenever either changes.
+
 ## 1. Get the code
 
 Download the release as one ZIP file, [sqlstudio-main.zip](https://github.com/MateuszDabrowski/sqlstudio/archive/refs/heads/main.zip), and unpack it. The three files you need are in its `src` folder. You fill in their settings in steps 2 and 3, and paste them into MCE in step 4.
@@ -38,7 +56,7 @@ Web Studio > CloudPages. Open a CloudPages folder, or create one for SQL Studio,
 
 If your account has private domains, CloudPages asks for URL settings as you create each piece:
 
-1. **URL:** pick the domain.
+1. **URL:** pick the dedicated domain verified above.
 2. **Site Key:** give each piece its own readable name, for example `sql-studio`, `sql-studio-backend` and `sql-studio-frontend`. It becomes the path in the piece's URL. Do not leave it blank: a blank Site Key makes the piece the root page of that domain, and a domain has only one.
 3. **HTTPS:** turn it on. Marketing Cloud Engagement's own page runs on HTTPS, and browsers block an HTTP page inside it. HTTPS needs an SSL certificate for CloudPages on that domain, so pick a domain that has one.
 
@@ -302,7 +320,7 @@ Leave the `sql` length blank if you create the Data Extension yourself, so long 
 
 Since 1.3.0, Save to DE can also move a run's rows into a Data Extension that already exists, with Append, Update or Overwrite. The move uses the user's own login, so it writes only into Data Extensions the user can write in Contact Builder. SQL Studio never writes into its own Data Extensions, its temporary ones or synchronized ones.
 
-Weigh one risk before you leave it on. Another Cloud Page published on the same domain as SQL Studio may be able to sign in to SQL Studio as a user who opens that page while signed in to Marketing Cloud Engagement. A script on such a page could already run queries with that user's access. With this feature on, it could also change or delete, at once, the rows of any Data Extension that user can write. If people outside your team can publish Cloud Pages in this account, or your landing pages load scripts you do not control, consider turning the feature off.
+With this feature on, a script that obtains a user's session could change or delete, at once, the rows of any Data Extension that user can write. Follow the dedicated-origin requirement above even when this feature is off: a compromised session can still run queries and change Query Activities.
 
 To turn it off, add one line to the Backend's settings:
 
