@@ -25,12 +25,15 @@
     /* Write() and the other Core library globals exist only once Core is loaded. Without this
     line, every path that writes the page fails with MCE's generic "page content contains errors". */
     Platform.Load('core', '1');
+    Platform.Response.SetResponseHeader('Cache-Control', 'no-store');
+    Platform.Response.SetResponseHeader('Referrer-Policy', 'strict-origin');
 
     /* ----------------------------------------------------------------------- */
     /* ------------------------ 2. GLOBAL VARIABLES --------------------------- */
     /* ----------------------------------------------------------------------- */
 
     var appName = 'SQLStudio';
+    var sessionStoreKey = 'ss.session.' + backendURL;
 
     /* The same guard as the backend's: when this "APP CODE" section is newer than the
     "1. CONFIGURATION" section above it, show a settings notice instead of running against
@@ -88,6 +91,32 @@
             return '';
         };
         return String(paramValue);
+    };
+
+    function formField(name) {
+        try {
+            var value = Platform.Request.GetFormField(name);
+            return (value === null || value === undefined) ? '' : String(value);
+        } catch (formErr) {
+            return '';
+        };
+    };
+
+    /**
+     * @function isTrustedSessionPost
+     * @description An external site must not sign a visitor into a session supplied by that site.
+     *              Accept handoffs and reloads only from the configured Backend's HTTPS origin.
+     *              Missing or opaque Origin headers fail closed; referrers are not a fallback.
+     */
+    function isTrustedSessionPost() {
+        var match = /^https:\/\/([a-z0-9.-]+)(?::([0-9]+))?(?:[\/?#]|$)/i.exec(String(backendURL));
+        if (!match) return false;
+        var expected = 'https://' + match[1].toLowerCase() + (match[2] && Number(match[2]) !== 443 ? ':' + Number(match[2]) : '');
+        try {
+            return String(Platform.Request.GetRequestHeader('Origin') || '') === expected;
+        } catch (originErr) {
+            return false;
+        };
     };
 
     /**
@@ -305,6 +334,7 @@
         Write('<script>');
         Write('(function () {');
         Write('    var backendUrl = ' + Stringify(String(backendURL)) + ';');
+        Write('    try { sessionStorage.removeItem(' + Stringify(sessionStoreKey) + '); } catch (e) {}');
         Write('    var key = \'ss.signInAttempts\';');
         Write('    var now = Date.now();');
         Write('    var attempts = null;');
@@ -319,6 +349,28 @@
         Write('    location.replace(backendUrl);');
         Write('})();');
         Write('<\/script>');
+    };
+
+    /**
+     * @function writeSessionBootstrap
+     * @description A clean GET restores this tab's session through a POST to this page. Keeping
+     *              sessions in sessionStorage preserves independent tabs and Business Unit sessions
+     *              without putting a bearer credential in navigation URLs or persistent localStorage.
+     */
+    function writeSessionBootstrap() {
+        startDocument();
+        Write('<div id="ss-storage-error" hidden>');
+        writeErrorBlock('SQL Studio needs browser storage',
+            'Allow session storage for this page, then try signing in again.', '');
+        Write('</div><script>(function () {');
+        Write('var session; try { session = sessionStorage.getItem(' + Stringify(sessionStoreKey) + ') || ""; }');
+        Write('catch (e) { document.getElementById("ss-storage-error").hidden = false; return; }');
+        Write('if (!/^[0-9a-fA-F-]{36}$/.test(session)) { location.replace(' + Stringify(String(backendURL)) + '); return; }');
+        Write('var form = document.createElement("form"); form.method = "post";');
+        Write('form.action = location.origin + location.pathname;');
+        Write('var input = document.createElement("input"); input.type = "hidden"; input.name = "s"; input.value = session;');
+        Write('form.appendChild(input); document.body.appendChild(form); form.submit();');
+        Write('})();<\/script>');
     };
 
     /* 3.1. An OAuth failure sends the visitor back here with ?error=...; when
@@ -383,13 +435,12 @@
         /* --------------------------- 5. SESSION GATE --------------------------- */
         /* --------------------------------------------------------------------- */
 
-        /* 5.1. Get session code and the optional post-setup flag from the query string. L1: validate
-        the session's shape before it is used in any Lookup filter - anything that is not GUID-shaped
-        is treated the same as "no session" and sent back to sign in, so a malformed `s` never reaches
-        a Lookup. Only the exact value 'created' counts for setup; anything else is treated as absent. */
-        var session = queryParam('s');
-        var sessionIsValid = /^[0-9a-fA-F-]{36}$/.test(session);
-        var isSetupPending = queryParam('setup') === 'pending';
+        /* Sessions arrive only in a POST body. Old session-bearing links must sign in again;
+        their query string is never accepted as a credential or put into browser storage. */
+        var isPost = Platform.Request.Method() === 'POST';
+        var session = isPost ? formField('s') : '';
+        var sessionIsValid = !hasQueryParam('s') && /^[0-9a-fA-F-]{36}$/.test(session) && isTrustedSessionPost();
+        var isSetupPending = isPost && formField('setup') === 'pending';
 
         /* 5.2. Read the session from AuthLog and decide what to show. The decision is made inside the
         try and acted on after it: Platform.Response.Redirect stops the script, and a catch around it
@@ -429,7 +480,15 @@
         };
 
         if (gate === 'signIn') {
-            Platform.Response.Redirect(backendURL);
+            if (hasQueryParam('s')) {
+                writeErrorBlock('Sign in to SQL Studio again',
+                    'Session-bearing links are no longer accepted. Update the Backend, Cloud Page and Frontend together, then use Try again to start a new sign-in.', '');
+            } else if (isPost) {
+                writeErrorBlock('SQL Studio could not read your sign-in',
+                    'The sign-in handoff was missing or malformed. Try signing in again.', '');
+            } else {
+                writeSessionBootstrap();
+            };
         } else if (gate === 'signInRetry') {
             writeSignInRetry();
         } else if (gate === 'hashError') {
@@ -468,6 +527,7 @@
             Write('<div id="sqlstudio" class="ss"></div>');
 
             Write('<script>');
+            Write('try { sessionStorage.setItem(' + Stringify(sessionStoreKey) + ', ' + Stringify(session) + '); } catch (e) {}');
             Write('window.SQLStudioConfig = {');
             Write('    session: \'' + session + '\',');
             Write('    backendUrl: \'' + backendURL + '\',');

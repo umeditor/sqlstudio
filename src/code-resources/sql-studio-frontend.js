@@ -35783,17 +35783,18 @@ window.SQLStudioEmbeddedCss = "/* ==============================================
     };
 
     /**
-     * @function replaceSessionInUrl
-     * @description Puts a renewed session id in the address bar, so a reload opens the live session.
+     * @function rememberSession
+     * @description Keeps a renewed session in this tab for reloads, never in the address bar.
      * @param {string} sessionId
      */
-    function replaceSessionInUrl(sessionId) {
+    function rememberSession(sessionId) {
         try {
+            global.sessionStorage.setItem('ss.session.' + Config.data.backendUrl, sessionId);
             var url = new URL(global.location.href);
-            url.searchParams.set('s', sessionId);
+            url.searchParams.delete('s');
             global.history.replaceState(null, '', url.toString());
         } catch (e) {
-            /* the address bar keeps the old id; a reload then asks to renew */
+            /* A reload asks to sign in again when sessionStorage is unavailable. */
         };
     };
 
@@ -35803,7 +35804,7 @@ window.SQLStudioEmbeddedCss = "/* ==============================================
         /**
          * @method run
          * @description Signs in again in a hidden frame, the same sign-in Renew does, and resolves with the
-         * new session id. The app reads it from the address the frame's sign-in ends on, so no other page
+         * new session id. The app reads it from the configured Cloud Page reached by the frame, so no other page
          * can hand the app a session. The Cloud Page the sign-in ends on only asks the app to look (see
          * frameArrived): reading the frame while Marketing Cloud Engagement's sign-in pages were in it made Safari log
          * a blocked access each time. Rejects when the sign-in ends anywhere else, or after
@@ -35860,7 +35861,12 @@ window.SQLStudioEmbeddedCss = "/* ==============================================
                         return;
                     };
                     if (url.origin !== global.location.origin) return;
-                    var sessionId = url.searchParams.get('s') || '';
+                    var sessionId = '';
+                    try {
+                        sessionId = (frame.contentWindow.SQLStudioConfig || {}).session || '';
+                    } catch (e) {
+                        return;
+                    };
                     if (url.pathname === global.location.pathname && SESSION_ID_RE.test(sessionId)) {
                         finish(null, sessionId);
                         return;
@@ -36043,10 +36049,10 @@ window.SQLStudioEmbeddedCss = "/* ==============================================
                      * neither, the new session cannot be tied to this page, so it counts as another user's. */
                     var pageUserKey = self.data.userKey || Config.data.userKey || '';
                     var isOtherUser = !pageUserKey || !answer || answer.userKey !== pageUserKey;
-                    /* The address takes the new session either way: for another user, the reload below must
+                    /* This tab remembers the new session either way: for another user, the reload below must
                      * open that session, not this page's old one, which would renew into it again, in a loop,
                      * while the old token lasts. Only the same user's is adopted for this page's calls. */
-                    replaceSessionInUrl(sessionId);
+                    rememberSession(sessionId);
                     if (!isOtherUser) Config.data.session = sessionId;
                     return {
                         data: answer,

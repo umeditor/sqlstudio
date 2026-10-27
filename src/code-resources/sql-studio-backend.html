@@ -30,6 +30,11 @@
 
     Platform.Load('core', '1');
 
+    /* Sign-in responses carry authorization codes or a session handoff. Never cache them or
+    send URL paths or query strings as referrers. Keep Origin available for the POST handoff. */
+    Platform.Response.SetResponseHeader('Cache-Control', 'no-store');
+    Platform.Response.SetResponseHeader('Referrer-Policy', 'strict-origin');
+
     /* REQUIRED_CONFIG_VERSION guards against an old "1. CONFIGURATION" section being paired with a
     newer "APP CODE" section after an update: every POST then returns a CONFIG_OUTDATED error instead
     of running against settings a newer release may have added fields for, and GET writes the same
@@ -2732,6 +2737,71 @@
         /* -------------------- 4. AUTHENTICATION FLOW (GET) -------------------- */
         /* --------------------------------------------------------------------- */
 
+        function httpsOrigin(url) {
+            var match = /^https:\/\/([a-z0-9.-]+)(?::([0-9]+))?(?:[\/?#]|$)/i.exec(String(url || ''));
+            if (!match) return '';
+            return 'https://' + match[1].toLowerCase() + (match[2] && Number(match[2]) !== 443 ? ':' + Number(match[2]) : '');
+        };
+
+        /**
+         * @function oauthCookieName
+         * @description A host-only cookie scoped to this installation and attempt, so sign-ins in
+         *              separate tabs do not overwrite each other's state.
+         * @returns {string}
+         */
+        function oauthCookieName(state) {
+            return '__Host-SQLStudioOAuth-' + sha256Hex(clientID + '|' + backendURL).substring(0, 16) + '-' + String(state).split('.')[0];
+        };
+
+        function oauthStateProof(state) {
+            return sha256Hex('SQLStudio.oauth-state.v1|' + state + '|' + clientSecret);
+        };
+
+        function setOAuthCookie(state, value, maxAge) {
+            Platform.Response.SetResponseHeader('Set-Cookie', oauthCookieName(state) + '=' + value +
+                '; Path=/; Max-Age=' + maxAge + '; Secure; HttpOnly; SameSite=None');
+        };
+
+        /**
+         * @function consumeOAuthState
+         * @description Match a recent state to the browser that started sign-in. Clear its cookie
+         *              before exchanging a code or accepting an OAuth error. Missing/blocked cookies
+         *              fail closed; the cookie is never replaced by a referrer check.
+         * @param {string} state
+         * @returns {boolean}
+         */
+        function consumeOAuthState(state) {
+            var match = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.([0-9]{13})$/i.exec(String(state || ''));
+            if (!match) return false;
+            var age = (new Date()).getTime() - Number(match[2]);
+            if (age < -30000 || age > 300000) return false;
+            var proof = '';
+            try {
+                proof = String(Platform.Request.GetCookieValue(oauthCookieName(state)) || '');
+            } catch (cookieErr) {
+                return false;
+            };
+            if (proof !== oauthStateProof(state)) return false;
+            setOAuthCookie(state, '', 0);
+            return true;
+        };
+
+        /**
+         * @function writeSignInHandoff
+         * @description Send the newly minted session in an HTTPS POST body, never a redirect URL.
+         *              This response loads no external resources. The Cloud Page stores the session
+         *              in the tab's sessionStorage for reloads and background renewal.
+         */
+        function writeSignInHandoff() {
+            stringifiedResponse = '';
+            Platform.Response.SetResponseHeader('Content-Type', 'text/html; charset=utf-8');
+            Write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>Signing in to SQL Studio</title></head><body>');
+            Write('<form id="ss-signin" method="post" action="' + xmlEscape(pageURL) + '">');
+            Write('<input type="hidden" name="s" value="' + signInSession + '">');
+            if (signInSetupPending) Write('<input type="hidden" name="setup" value="pending">');
+            Write('<button type="submit">Continue to SQL Studio</button></form>');
+            Write('<script>document.getElementById("ss-signin").submit();<\/script></body></html>');
+        };
         /**
          * @function authErrorRedirectUrl
          * @description Logs an authentication error and returns the Cloud Page URL that shows it, with a
@@ -2850,7 +2920,8 @@
          * @param {string} userName
          * @param {string} userEmail
          * @param {string} userId
-         * @returns {string} the URL to redirect to: the Cloud Page with the session, or its error block.
+         * @returns {string} the Cloud Page URL, or its error block. A successful sign-in hands the
+         *          session over in a POST body through writeSignInHandoff, never in this URL.
          *          Exactly one target is chosen: a redirect to a session that was never stored would send
          *          the visitor straight back here, in an endless loop.
          */
@@ -2881,11 +2952,9 @@
             };
 
             if (isAuthLogWritten) {
-                var redirectUrl = pageURL + '?s=' + sessionId;
-                if (isSetupPending) {
-                    redirectUrl += '&setup=pending';
-                };
-                return redirectUrl;
+                signInSession = sessionId;
+                signInSetupPending = isSetupPending;
+                return pageURL;
             };
             if (isAuthLogOld) {
                 return authErrorRedirectUrl({ code: 'authlog_old_layout', message: 'The sign-in log is from an older release.', description: 'The "' + authDE + '" Data Extension has the layout of an older release: delete it in Contact Builder, and SQL Studio creates it again on the next sign-in (see docs/DEPLOYMENT.md).' });
@@ -2917,33 +2986,42 @@
         try whose catch could swallow it, and an unexpected error anywhere in sign-in lands on the
         Cloud Page's error block with an ErrorLog row instead of MCE's generic error page. */
         var authRedirect = null;
+        var signInSession = null;
+        var signInSetupPending = false;
         try {
             var state = Platform.Request.GetQueryStringParameter('state');
+            var authCode = Platform.Request.GetQueryStringParameter('code');
             var errorMessage = Platform.Request.GetQueryStringParameter('error');
             var errorDescription = Platform.Request.GetQueryStringParameter('error_description');
 
+            if (httpsOrigin(backendURL) === '' || httpsOrigin(pageURL) !== httpsOrigin(backendURL)) {
+                throw apiError('CONFIG_INVALID', 'SQL Studio sign-in requires pageURL and backendURL on the same HTTPS origin.', null);
+            };
+
             /* ---------------------- 4.1. Authorization ---------------------------- */
 
-            if (!state && !errorMessage) {
-                state = GUID();
+            if (!state && !authCode && !errorMessage) {
+                state = GUID() + '.' + (new Date()).getTime();
+                setOAuthCookie(state, oauthStateProof(state), 300);
                 var authorizeUrl = authBase + '/v2/authorize?response_type=code&client_id=' + clientID +
                     '&redirect_uri=' + urlEncode(backendURL) + '&state=' + state + '&scope=' + urlEncode(scopes);
                 authRedirect = authorizeUrl;
 
                 /* -------------------- 4.2. Authentication with REST Token ---------- */
 
-            } else if (state && !errorMessage) {
+            } else if (!consumeOAuthState(state)) {
+                authRedirect = authErrorRedirectUrl({ code: 'invalid_state', message: 'Invalid sign-in request', description: 'The sign-in state was missing, expired or did not match this browser.', isUnlogged: true });
+
+            } else if (!errorMessage) {
 
                 /* H2 (session fixation): `state` is chosen by whoever starts the authorize request, so it
                 must never become the session credential - an attacker can open the backend URL, copy the
                 authorize link with its `state`, and send it to a colleague; once the colleague signs in,
-                the attacker's own `state` would carry the colleague's token. Reject anything that is not
-                GUID-shaped before it is used for anything, and mint a fresh, unguessable session id below
-                instead of reusing `state` as the session. */
-                if (!/^[0-9a-fA-F-]{36}$/.test(state)) {
-                    authRedirect = authErrorRedirectUrl({ code: 'invalid_state', message: 'Invalid sign-in request', description: 'The state parameter was not a valid session id.' });
+                the attacker's own `state` would carry the colleague's token. The browser-bound state
+                has been consumed above; mint a fresh session after a successful code exchange. */
+                if (typeof authCode !== 'string' || authCode.length < 1 || authCode.length > 512) {
+                    authRedirect = authErrorRedirectUrl({ code: 'invalid_request', message: 'Invalid sign-in request', description: 'The authorization code was missing or malformed.', isUnlogged: true });
                 } else {
-                    var authCode = Platform.Request.GetQueryStringParameter('code');
                     var tokenPayload = {
                         grant_type: 'authorization_code',
                         code: authCode,
@@ -3010,7 +3088,9 @@
         } catch (authFlowErr) {
             authRedirect = authErrorRedirectUrl({ code: 'signin_failed', message: 'Sign-in failed unexpectedly', description: describeError(authFlowErr) });
         };
-        if (authRedirect) {
+        if (signInSession) {
+            writeSignInHandoff();
+        } else if (authRedirect) {
             Platform.Response.Redirect(authRedirect);
         };
 
