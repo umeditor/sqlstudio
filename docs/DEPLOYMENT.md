@@ -112,7 +112,7 @@ The Backend and the Cloud Page each start with a section called `1. CONFIGURATIO
 /* =================== APP CODE - replace from here on update =================== */
 ```
 
-Steps 2 and 3 filled in the settings every deployment needs. The tables below list every setting. Leave the others as they are. The one choice to make is `historyDE`: whether query history stays in each browser, or is also kept in MCE, where other users can read it. A second setting, `snippetsDE`, is not in the file: snippets are on by default, and the line that turns them off or renames their Data Extension is in step 7. The Frontend has no settings at all.
+Steps 2 and 3 filled in the settings every deployment needs. The tables below list every setting. Leave the others as they are. Choose `historyDE` before publishing: it controls whether query history stays in each browser, or is also kept in MCE, where other users can read it. Saving to permanent Data Extensions and saving Query Activities are disabled unless an administrator adds `permanentWrites = true`, as described in step 7. A second optional setting, `snippetsDE`, is not in the file: snippets are on by default, and the line that turns them off or renames their Data Extension is in step 7. The Frontend has no settings at all.
 
 ### Backend (`sql-studio-backend.html`)
 
@@ -129,6 +129,7 @@ Steps 2 and 3 filled in the settings every deployment needs. The tables below li
 | `historyDE` | Where each user's query history is kept. Empty, the default: in each user's own browser only. `SQLStudioHistory`: also in a Data Extension in MCE for 90 days, so it follows users to other browsers, but every user with Data Extension access in this Business Unit can read every user's queries. Choose before you publish (see step 7). |
 | `allowedReferrers` | Optional list of URL prefixes allowed to call the Backend. Empty turns the check off. A referrer matches a prefix only when it is that prefix, or continues with `/`, `?` or `#` after it, so `https://host` does not allow `https://host.evil.io`. |
 | `debugging` | `false`. `true` writes debug output into responses instead of logging to the error log, and is for troubleshooting only. |
+| `permanentWrites` (optional) | Absent, the default: Save, Save as and Save to DE are disabled. Add `var permanentWrites = true;` above the `APP CODE` line to enable them. Only boolean `true` enables writes. See step 7. |
 
 ### Cloud Page (`sql-studio.html`)
 
@@ -298,9 +299,23 @@ var snippetsDE = 'TeamSnippets';
 
 Leave the `sql` length blank if you create the Data Extension yourself, so long snippets fit. If a Data Extension of that name exists with a field missing, SQL Studio says which field and does not create another: add the field as Text in Contact Builder, or delete the Data Extension, and SQL Studio creates it again with the next save.
 
-### Saving into existing Data Extensions (on by default)
+### Permanent writes (admin opt-in)
 
-Since 1.3.0, Save to DE can also move a run's rows into a Data Extension that already exists, with Append, Update or Overwrite. The move uses the user's own login, so it writes only into Data Extensions the user can write in Contact Builder. SQL Studio never writes into its own Data Extensions, its temporary ones or synchronized ones.
+By default, SQL Studio rejects Save and Save as for Query Activities and Save to DE for both new and existing Data Extensions. This includes direct Backend requests: `createDataExtension`, `moveToDataExtension`, `saveQueryActivity` and `updateQueryActivity` return `PERMANENT_WRITES_DISABLED` before their handlers run. The existing Frontend still shows its save controls and reports this error when a user tries to save.
+
+An administrator can enable these actions by adding this optional line to the Backend's settings, above the `APP CODE` line, then publishing the Backend:
+
+```js
+var permanentWrites = true;
+```
+
+Only boolean `true` enables them. Removing the line, setting it to `false`, or entering a string such as `'true'` leaves them disabled. This setting applies to everyone using the Backend; the user's own MCE permissions still limit each enabled save. Enabling it permits permanent Query Activity changes and Data Extension writes, including Overwrite, unless the additional `existingTargets` restriction below is set.
+
+Querying, opening saved Query Activities, reading and exporting results, and cleanup remain available. SQL Studio still creates and updates its own query-run objects and application-managed logs, history and snippets. This restriction is not a platform-wide read-only permission and does not change the Installed Package scopes needed to run queries.
+
+### Saving into existing Data Extensions (when permanent writes are enabled)
+
+With `permanentWrites = true`, Save to DE can also move a run's rows into a Data Extension that already exists, with Append, Update or Overwrite. The move uses the user's own login, so it writes only into Data Extensions the user can write in Contact Builder. SQL Studio never writes into its own Data Extensions, its temporary ones or synchronized ones.
 
 Weigh one risk before you leave it on. Another Cloud Page published on the same domain as SQL Studio may be able to sign in to SQL Studio as a user who opens that page while signed in to Marketing Cloud Engagement. A script on such a page could already run queries with that user's access. With this feature on, it could also change or delete, at once, the rows of any Data Extension that user can write. If people outside your team can publish Cloud Pages in this account, or your landing pages load scripts you do not control, consider turning the feature off.
 
@@ -309,13 +324,13 @@ To turn it off, add one line to the Backend's settings:
 1. Open "SQL Studio Backend" in Web Studio, the Code Resource you pasted the Backend into.
 2. Find the line that starts `var debugging = false;`, the last line of the settings, above the `APP CODE` line. Click at its end and press Enter to start a new line. If you added a `snippetsDE` line there, click at the end of that line instead.
 3. Type or paste the line below, with a `;` at the end.
-4. Publish the Backend again, wait about five minutes, and do a hard refresh of SQL Studio. Save to DE then offers only a new Data Extension, as in 1.2.
+4. Publish the Backend again, wait about five minutes, and do a hard refresh of SQL Studio. With permanent writes enabled, Save to DE then offers only a new Data Extension, as in 1.2. Save and Save as for Query Activities remain enabled.
 
 ```js
 var existingTargets = false;
 ```
 
-To turn it on again, delete the line and publish the Backend again.
+To allow existing targets again, delete the `existingTargets` line and publish the Backend again. It never overrides `permanentWrites`: without that opt-in, all four permanent-write actions remain disabled.
 
 ### What SQL Studio stores and who can read it
 
@@ -336,6 +351,8 @@ There is no setting that turns Document off. A network policy that blocks `diagr
 
 ## 8. Updating
 
+**Permanent-write behavior changes on update.** Replacing only the Backend's `APP CODE` section disables Save, Save as and Save to DE unless its configuration already contains `var permanentWrites = true;`. Query runs and exports continue to work. Review whether permanent writes are needed before adding that opt-in; an existing `existingTargets` setting alone does not enable them. The Cloud Page, Frontend and `configVersion` need no change for this optional setting.
+
 Update the Code Resources first and the Cloud Page last, for the same reason as in step 4.
 
 1. **Frontend**: open "SQL Studio Frontend", replace its whole content with the new `sql-studio-frontend.min.js`, and publish. It has no settings.
@@ -344,7 +361,7 @@ Update the Code Resources first and the Cloud Page last, for the same reason as 
 
 A release that needs new settings raises `configVersion`, and the CHANGELOG says so. Until you update the settings, the Backend and the Cloud Page each show a message that their `1. CONFIGURATION` section is from an older release. Copy the new settings section from the release file, fill in your values again, and publish.
 
-If you added a `snippetsDE` or an `existingTargets` line to the Backend's settings in step 7, carry it over when you copy a new settings section. The steps below name `snippetsDE`, and an `existingTargets` line is carried over the same way: without it, saving into existing Data Extensions comes back on. The release file never has that line, so the new section comes without it. Without it, snippets come back on under the default name: the Snippets section shows again where you had turned it off, and where you had named your own Data Extension, SQL Studio starts a new, empty `SQLStudioSnippets` instead. To carry it over:
+If you added a `snippetsDE`, `permanentWrites` or `existingTargets` line to the Backend's settings in step 7, carry it over when you copy a new settings section. The steps below name `snippetsDE`; carry over the other optional lines the same way. Without `permanentWrites`, permanent writes are disabled. With permanent writes enabled but no `existingTargets` line, saving into existing Data Extensions is allowed again. The release file has none of these optional lines. Without `snippetsDE`, snippets come back on under the default name: the Snippets section shows again where you had turned it off, and where you had named your own Data Extension, SQL Studio starts a new, empty `SQLStudioSnippets` instead. To carry it over:
 
 1. Before you paste anything, open "SQL Studio Backend" in Web Studio.
 2. Find the line that starts `var snippetsDE`. Step 7 put it right below `var debugging = false;`, the last setting, just above the `APP CODE` line.

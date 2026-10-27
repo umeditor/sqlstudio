@@ -185,7 +185,7 @@
     /**
      * @function apiError
      * @description Builds a plain error object carrying one of the documented error codes.
-     * @param {string} code - One of BAD_REQUEST, SESSION_INVALID, SESSION_EXPIRED, UNKNOWN_ACTION, MCE_ERROR, WSPROXY_FAILED, NOT_FOUND, RUN_IN_PROGRESS, START_UNCONFIRMED, CREATE_UNCONFIRMED, CREATED_NO_KEY, HISTORY_OLD_LAYOUT, SNIPPETS_BAD_LAYOUT, INTERNAL.
+     * @param {string} code - One of BAD_REQUEST, SESSION_INVALID, SESSION_EXPIRED, UNKNOWN_ACTION, PERMANENT_WRITES_DISABLED, MCE_ERROR, WSPROXY_FAILED, NOT_FOUND, RUN_IN_PROGRESS, START_UNCONFIRMED, CREATE_UNCONFIRMED, CREATED_NO_KEY, HISTORY_OLD_LAYOUT, SNIPPETS_BAD_LAYOUT, INTERNAL.
      * @param {string} message - Human readable message.
      * @param {string} [details] - Optional raw detail text.
      * @returns {Object} error object with code, message, details.
@@ -3135,8 +3135,20 @@
         };
 
         /**
+         * @function readPermanentWrites
+         * @description Permanent Data Extension saves and Query Activity saves require the optional
+         *              setting `var permanentWrites = true;`. Missing or mistyped settings leave them
+         *              disabled, including when only the APP CODE section is updated. Query runs and
+         *              SQL Studio's own temporary objects, logs, history and snippets are unaffected.
+         * @returns {boolean}
+         */
+        function readPermanentWrites() {
+            return typeof permanentWrites !== 'undefined' && permanentWrites === true;
+        };
+
+        /**
          * @function readExistingTargets
-         * @description Whether Save to DE may move rows into a Data Extension that exists (1.3.0). The settings need no line for it:
+         * @description Once permanent writes are enabled, whether Save to DE may move rows into a Data Extension that exists (1.3.0). The settings need no line for it:
          *              without one it is on, so an update to 1.3.0 needs no new settings section. An admin adds
          *              `var existingTargets = false;` to turn it off, as such a move writes into any Data Extension the user's token
          *              can write at once, where a script in the user's session could already run queries and change Query
@@ -8468,6 +8480,12 @@
             };
             if (!handlers.hasOwnProperty(action)) {
                 throw apiError('UNKNOWN_ACTION', 'Unknown action: ' + action, null);
+            };
+            /* Enforced after authentication, before any save handler can make a change. A request's
+            payload cannot opt in; only the Backend's configuration can enable permanent writes. */
+            if ((action === 'createDataExtension' || action === 'moveToDataExtension' ||
+                action === 'saveQueryActivity' || action === 'updateQueryActivity') && !readPermanentWrites()) {
+                throw apiError('PERMANENT_WRITES_DISABLED', 'Saving to Data Extensions and saving Query Activities are disabled. An administrator must set permanentWrites = true in the Backend configuration to enable them.', null);
             };
             var handler = handlers[action];
             var data = handler(payload, authRow);
